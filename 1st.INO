@@ -76,10 +76,13 @@ struct CageState {
 CageState cage1 = {"Cage1", "settings/cage1", false, 0, 0, "", 0, 0, "", "", "", "", false};
 CageState cage2 = {"Cage2", "settings/cage2", false, 0, 0, "", 0, 0, "", "", "", "", false};
 
-// --- TIMERS ---
+// --- TIMERS & FAST CACHE ---
 unsigned long lastOnlineReport = 0;
 unsigned long lastWiFiCheck = 0; 
-unsigned long lastFirebaseCheck = 0; // Moved here so we can control it on reconnect
+unsigned long lastFirebaseCheck = 0; 
+unsigned long lastDHTReadTime = 0; 
+float lastT1 = 0, lastH1 = 0;
+float lastT2 = 0, lastH2 = 0;
 bool isAdapterPowerOn = true; 
 
 // --- FUNCTION PROTOTYPES ---
@@ -87,8 +90,8 @@ void checkCommands(CageState &cage, FirebaseData &fbdo);
 void managePowerSource();
 void collectData(CageState &cage, int cageNum);
 void logToSDBatch(CageState &cage, String dateStr, String timeStr, float t, float h, float lux, float elecMV, float soilMV);
-int readADS_Average(uint8_t channel, int samples);
-float readLightAverage(BH1750 &sensor);
+int readADS_Fast(uint8_t channel);
+float readLightFast(BH1750 &sensor);
 void verifyRTC(); 
 void addWebLog(String msg);
 void handleRoot();
@@ -162,6 +165,10 @@ void setup() {
   Firebase.begin(&config, &auth);
   Firebase.reconnectWiFi(false); 
 
+  // Initialize DHT Cache values
+  lastT1 = dht1.readTemperature(); lastH1 = dht1.readHumidity();
+  lastT2 = dht2.readTemperature(); lastH2 = dht2.readHumidity();
+
   // --- DEBUG STEP 5: Cage Initialization ---
   addWebLog("Cage1 Initialized safely. Staying IDLE.");
   delay(200);
@@ -176,31 +183,28 @@ void loop() {
 
   // --- WIFI AUTO RECONNECT LOGIC ---
   if (WiFi.status() != WL_CONNECTED) {
-      wasOffline = true; // Mark that we are offline
-      if (millis() - lastWiFiCheck > 30000) { // Try to connect every 30 seconds
+      wasOffline = true; 
+      if (millis() - lastWiFiCheck > 30000) { 
           lastWiFiCheck = millis();
           WiFi.disconnect();
           WiFi.begin(ssid, password);
           addWebLog("WiFi Disconnected. Attempting Reconnect...");
       }
   } else {
-      // --- WAKE UP FIX ---
       if (wasOffline) {
           wasOffline = false; 
           addWebLog("WiFi RECONNECTED! New IP: " + WiFi.localIP().toString());
-          server.begin(); // Refresh the local web server
+          server.begin(); 
           
-          // Clear dead session buffers
           fbdo1.clear();
           fbdo2.clear();
           fbdoStatus.clear();
 
-          // FIX: Reset timers so Firebase waits 10 seconds to stabilize before sending data
+          Firebase.begin(&config, &auth); 
           lastOnlineReport = millis(); 
           lastFirebaseCheck = millis(); 
       }
 
-      // Only do Firebase stuff if WiFi is connected
       if (Firebase.ready() && (millis() - lastOnlineReport > 15000)) {
          lastOnlineReport = millis();
          DateTime now = rtc.now();
@@ -222,6 +226,15 @@ void loop() {
               managePowerSource(); 
           }
       }
+  }
+
+  // Read slow DHT sensors only once every 2 seconds to prevent hardware freeze
+  if (millis() - lastDHTReadTime >= 2000) {
+      lastT1 = dht1.readTemperature();
+      lastH1 = dht1.readHumidity();
+      lastT2 = dht2.readTemperature();
+      lastH2 = dht2.readHumidity();
+      lastDHTReadTime = millis();
   }
 
   // --- DATA COLLECTION ALWAYS RUNS ---
@@ -476,17 +489,17 @@ void collectData(CageState &cage, int cageNum) {
       int rawElec = 0, rawSoil = 0;
 
       if (cageNum == 1) {
-          t = dht1.readTemperature();
-          h = dht1.readHumidity();
-          lux = readLightAverage(lightMeter1);
-          rawElec = readADS_Average(0, 5);
-          rawSoil = readADS_Average(2, 5);
+          t = lastT1;  // Uses cached DHT value
+          h = lastH1;
+          lux = readLightFast(lightMeter1); // FAST READ
+          rawElec = readADS_Fast(0);        // FAST READ
+          rawSoil = readADS_Fast(2);        // FAST READ
       } else {
-          t = dht2.readTemperature();
-          h = dht2.readHumidity();
-          lux = readLightAverage(lightMeter2);
-          rawElec = readADS_Average(1, 5);
-          rawSoil = readADS_Average(3, 5);
+          t = lastT2;  // Uses cached DHT value
+          h = lastH2;
+          lux = readLightFast(lightMeter2); // FAST READ
+          rawElec = readADS_Fast(1);        // FAST READ
+          rawSoil = readADS_Fast(3);        // FAST READ
       }
 
       // Convert raw ADS values to Millivolts (mV)
@@ -527,20 +540,12 @@ void logToSDBatch(CageState &cage, String dateStr, String timeStr, float t, floa
   }
 }
 
-int readADS_Average(uint8_t channel, int samples) {
-  long sum = 0;
-  for (int i = 0; i < samples; i++) {
-    sum += ads.readADC_SingleEnded(channel);
-    delay(10); 
-  }
-  return sum / samples;
+// --- FAST READ FUNCTIONS ---
+int readADS_Fast(uint8_t channel) {
+  return ads.readADC_SingleEnded(channel);
 }
 
-float readLightAverage(BH1750 &sensor) {
-  float sum = 0;
-  for (int i = 0; i < 5; i++) { 
-    sum += sensor.readLightLevel();
-    delay(50); 
-  }
-  return sum / 5.0;
+float readLightFast(BH1750 &sensor) {
+  float l = sensor.readLightLevel();
+  return (l < 0) ? 0 : l;
 }
