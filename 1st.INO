@@ -13,6 +13,8 @@
 #include <WebServer.h>
 #include <Firebase_ESP_Client.h>
 #include <time.h> 
+#include <vector>
+#include <algorithm>
 
 // Provide the token generation process info
 #include "addons/TokenHelper.h"
@@ -76,13 +78,10 @@ struct CageState {
 CageState cage1 = {"Cage1", "settings/cage1", false, 0, 0, "", 0, 0, "", "", "", "", false};
 CageState cage2 = {"Cage2", "settings/cage2", false, 0, 0, "", 0, 0, "", "", "", "", false};
 
-// --- TIMERS & FAST CACHE ---
+// --- TIMERS ---
 unsigned long lastOnlineReport = 0;
 unsigned long lastWiFiCheck = 0; 
 unsigned long lastFirebaseCheck = 0; 
-unsigned long lastDHTReadTime = 0; 
-float lastT1 = 0, lastH1 = 0;
-float lastT2 = 0, lastH2 = 0;
 bool isAdapterPowerOn = true; 
 
 // --- FUNCTION PROTOTYPES ---
@@ -90,8 +89,8 @@ void checkCommands(CageState &cage, FirebaseData &fbdo);
 void managePowerSource();
 void collectData(CageState &cage, int cageNum);
 void logToSDBatch(CageState &cage, String dateStr, String timeStr, float t, float h, float lux, float elecMV, float soilMV);
-int readADS_Fast(uint8_t channel);
-float readLightFast(BH1750 &sensor);
+int readADS_Average(uint8_t channel, int samples);
+float readLightAverage(BH1750 &sensor);
 void verifyRTC(); 
 void addWebLog(String msg);
 void handleRoot();
@@ -105,26 +104,21 @@ void setup() {
   delay(1000);
   Serial.println(); 
 
-  // 1. Initialize Power Switch 
   pinMode(POWER_SWITCH_PIN, OUTPUT);
   digitalWrite(POWER_SWITCH_PIN, HIGH); 
 
-  // 2. Setup Base I2C & RTC 
   Wire.begin(I2C_SDA, I2C_SCL);
   if (!rtc.begin()) addWebLog("RTC not found!");
 
-  // 3. Setup MAX7400 Clock
   ledcAttach(MAX7400_CLK_PIN, 300, 8); 
   ledcWrite(MAX7400_CLK_PIN, 127); 
 
-  // 4. Initialize Sensors ONCE
   dht1.begin();
   dht2.begin();
   if (ads.begin()) ads.setGain(GAIN_ONE);
   lightMeter1.begin(BH1750::CONTINUOUS_HIGH_RES_MODE, 0x23, &Wire); 
   lightMeter2.begin(BH1750::CONTINUOUS_HIGH_RES_MODE, 0x5C, &Wire);
 
-  // --- DEBUG STEP 1: Initialize SD Card ---
   SPI.begin(SD_SCK, SD_MISO, SD_MOSI, SD_CS);
   if (!SD.begin(SD_CS)) {
     addWebLog("SD Card Mount Failed!");
@@ -133,7 +127,6 @@ void setup() {
   }
   delay(500);
 
-  // --- DEBUG STEP 2: Connect WiFi (Non-Blocking) ---
   Serial.print("Connecting to WiFi");
   WiFi.begin(ssid, password);
   unsigned long startAttemptTime = millis();
@@ -152,24 +145,17 @@ void setup() {
   }
   delay(500);
 
-  // 7. Setup Local Web Server Handlers
   server.on("/", handleRoot);
   server.on("/download", handleDownload);
   server.on("/delete", handleDelete);
   server.on("/logs", handleLogs);
   server.begin();
 
-  // 8. Setup Firebase
   config.api_key = API_KEY;
   config.signer.test_mode = true;
   Firebase.begin(&config, &auth);
   Firebase.reconnectWiFi(false); 
 
-  // Initialize DHT Cache values
-  lastT1 = dht1.readTemperature(); lastH1 = dht1.readHumidity();
-  lastT2 = dht2.readTemperature(); lastH2 = dht2.readHumidity();
-
-  // --- DEBUG STEP 5: Cage Initialization ---
   addWebLog("Cage1 Initialized safely. Staying IDLE.");
   delay(200);
   addWebLog("Cage2 Initialized safely. Staying IDLE.");
@@ -177,11 +163,10 @@ void setup() {
 
 // -------------------- MAIN LOOP --------------------
 void loop() {
-  server.handleClient(); // Local web server always runs
+  server.handleClient(); 
 
   static bool wasOffline = false; 
 
-  // --- WIFI AUTO RECONNECT LOGIC ---
   if (WiFi.status() != WL_CONNECTED) {
       wasOffline = true; 
       if (millis() - lastWiFiCheck > 30000) { 
@@ -200,7 +185,6 @@ void loop() {
           fbdo2.clear();
           fbdoStatus.clear();
 
-          Firebase.begin(&config, &auth); 
           lastOnlineReport = millis(); 
           lastFirebaseCheck = millis(); 
       }
@@ -219,37 +203,23 @@ void loop() {
       if (Firebase.ready()) {
           if (millis() - lastFirebaseCheck > 10000) { 
               lastFirebaseCheck = millis();
-              
               checkCommands(cage1, fbdo1);
               checkCommands(cage2, fbdo2);
-              
               managePowerSource(); 
           }
       }
   }
 
-  // Read slow DHT sensors only once every 2 seconds to prevent hardware freeze
-  if (millis() - lastDHTReadTime >= 2000) {
-      lastT1 = dht1.readTemperature();
-      lastH1 = dht1.readHumidity();
-      lastT2 = dht2.readTemperature();
-      lastH2 = dht2.readHumidity();
-      lastDHTReadTime = millis();
-  }
-
-  // --- DATA COLLECTION ALWAYS RUNS ---
   collectData(cage1, 1);
   collectData(cage2, 2);
 }
 
-// -------------------- WEB LOGGING FUNCTION --------------------
 void addWebLog(String msg) {
   Serial.println(msg); 
   webLogs[webLogIndex] = msg + "<br>"; 
   webLogIndex = (webLogIndex + 1) % MAX_WEB_LOGS;
 }
 
-// -------------------- RTC CALIBRATION LOGIC --------------------
 void verifyRTC() {
   if (WiFi.status() == WL_CONNECTED) {
     addWebLog("Verifying RTC time against Internet...");
@@ -305,24 +275,31 @@ void handleRoot() {
       <div id="file-list">
   )rawliteral";
 
+  std::vector<String> files;
   File root = SD.open("/");
-  bool hasFiles = false;
   while (true) {
     File entry = root.openNextFile();
-    if (!entry) break; 
-    
+    if (!entry) break;
     String fileName = String(entry.name());
     if (fileName.endsWith(".csv")) {
-      hasFiles = true;
-      html += "<div class='file-card'><div class='file-info'><b>" + fileName + "</b><br><small>" + String(entry.size() / 1024) + " KB</small></div>";
-      html += "<div><a class='btn btn-down' href='/download?file=/" + fileName + "'>Download</a>";
-      html += "<a class='btn btn-del' href='/delete?file=/" + fileName + "' onclick='return confirm(\"WARNING: Are you sure you want to delete " + fileName + "?\");'>Delete</a></div></div>";
+      files.push_back(fileName);
     }
     entry.close();
   }
   
-  if (!hasFiles) {
+  // Sort files in reverse order (newest first based on name)
+  std::sort(files.begin(), files.end(), std::greater<String>());
+
+  if (files.empty()) {
     html += "<p style='color: #f38ba8; padding: 20px;'>No CSV files found on SD Card.</p>";
+  } else {
+    for (const String& fileName : files) {
+      File entry = SD.open("/" + fileName);
+      html += "<div class='file-card'><div class='file-info'><b>" + fileName + "</b><br><small>" + String(entry.size() / 1024) + " KB</small></div>";
+      html += "<div><a class='btn btn-down' href='/download?file=/" + fileName + "'>Download</a>";
+      html += "<a class='btn btn-del' href='/delete?file=/" + fileName + "' onclick='return confirm(\"WARNING: Are you sure you want to delete " + fileName + "?\");'>Delete</a></div></div>";
+      entry.close();
+    }
   }
 
   html += R"rawliteral(
@@ -330,7 +307,6 @@ void handleRoot() {
       <h3 style="margin-top:40px; text-align:left; color:#89dceb; border-bottom: 2px solid #45475a; padding-bottom: 5px;">💻 Live Web Serial Monitor</h3>
       <div class="terminal" id="monitor">Waiting for system logs...</div>
     </div>
-    
     <script>
       setInterval(() => {
         fetch('/logs').then(r => r.text()).then(text => {
@@ -482,27 +458,26 @@ void collectData(CageState &cage, int cageNum) {
       cage.lastSampleTime = millis();
       
       DateTime now = rtc.now();
-      String dateToday = String(now.year()) + "-" + String(now.month()) + "-" + String(now.day());
+      String dateToday = String(now.year()) + "-" + (now.month() < 10 ? "0" : "") + String(now.month()) + "-" + (now.day() < 10 ? "0" : "") + String(now.day());
       String timeNow = String(now.hour()) + ":" + String(now.minute()) + ":" + String(now.second());
 
       float t = 0, h = 0, lux = 0;
       int rawElec = 0, rawSoil = 0;
 
       if (cageNum == 1) {
-          t = lastT1;  // Uses cached DHT value
-          h = lastH1;
-          lux = readLightFast(lightMeter1); // FAST READ
-          rawElec = readADS_Fast(0);        // FAST READ
-          rawSoil = readADS_Fast(2);        // FAST READ
+          t = dht1.readTemperature();
+          h = dht1.readHumidity();
+          lux = readLightAverage(lightMeter1);
+          rawElec = readADS_Average(0, 5);
+          rawSoil = readADS_Average(2, 5);
       } else {
-          t = lastT2;  // Uses cached DHT value
-          h = lastH2;
-          lux = readLightFast(lightMeter2); // FAST READ
-          rawElec = readADS_Fast(1);        // FAST READ
-          rawSoil = readADS_Fast(3);        // FAST READ
+          t = dht2.readTemperature();
+          h = dht2.readHumidity();
+          lux = readLightAverage(lightMeter2);
+          rawElec = readADS_Average(1, 5);
+          rawSoil = readADS_Average(3, 5);
       }
 
-      // Convert raw ADS values to Millivolts (mV)
       float elecMV = (rawElec * 4096.0) / 32768.0;
       float soilMV = (rawSoil * 4096.0) / 32768.0;
 
@@ -514,7 +489,8 @@ void collectData(CageState &cage, int cageNum) {
 }
 
 void logToSDBatch(CageState &cage, String dateStr, String timeStr, float t, float h, float lux, float elecMV, float soilMV) {
-  String filename = "/" + cage.name + "_" + cage.batch + ".csv";
+  // NEW FILENAME FORMAT: date_cage_cultivar_salinity.csv
+  String filename = "/" + dateStr + "_" + cage.name + "_" + cage.variety + "_" + cage.salinity + ".csv";
   filename.replace(" ", ""); 
 
   bool isNewFile = !SD.exists(filename);
@@ -532,7 +508,6 @@ void logToSDBatch(CageState &cage, String dateStr, String timeStr, float t, floa
     file.close();
     
     String debugMsg = "[" + cage.name + " " + timeStr + "] T:" + String(t, 1) + "C | L:" + String(lux, 0) + "lx | E:" + String(elecMV, 0) + "mV | S:" + String(soilMV, 0) + "mV";
-
     addWebLog(debugMsg);
 
   } else {
@@ -540,12 +515,20 @@ void logToSDBatch(CageState &cage, String dateStr, String timeStr, float t, floa
   }
 }
 
-// --- FAST READ FUNCTIONS ---
-int readADS_Fast(uint8_t channel) {
-  return ads.readADC_SingleEnded(channel);
+int readADS_Average(uint8_t channel, int samples) {
+  long sum = 0;
+  for (int i = 0; i < samples; i++) {
+    sum += ads.readADC_SingleEnded(channel);
+    delay(10); 
+  }
+  return sum / samples;
 }
 
-float readLightFast(BH1750 &sensor) {
-  float l = sensor.readLightLevel();
-  return (l < 0) ? 0 : l;
+float readLightAverage(BH1750 &sensor) {
+  float sum = 0;
+  for (int i = 0; i < 5; i++) { 
+    sum += sensor.readLightLevel();
+    delay(50); 
+  }
+  return sum / 5.0;
 }
