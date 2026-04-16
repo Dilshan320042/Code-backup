@@ -1,31 +1,44 @@
 #include <WiFi.h>
+#include <WebServer.h> // Library for Local Host
 
 const char* ssid = "Samsung galaxy s24";
 const char* password = "Dilshan@123456";
 
+// Create Web Server on port 80
+WebServer server(80);
+
 unsigned long previousMillis = 0;
-const long interval = 30000; // wifi reconnect delay time 30s
+const long interval = 30000; 
 bool lastConnectStatus = false; 
 
-//////////////////////////////////////////////////////////////////
+// Function to handle the website home page
+void handleRoot() {
+  server.send(200, "text/plain", "Hello! This is your ESP32 Local Host.");
+}
+
 void setup() {
   Serial.begin(115200);
   WiFi.mode(WIFI_STA);
   WiFi.begin(ssid, password);
+
+  // Define what happens when someone visits the IP address
+  server.on("/", handleRoot);
+  server.begin(); // Start the server
 }
 
-///////////////////////////////////////////////////////////////////
 void loop() {
   wificonnect();
   
+  // Only handle client requests if WiFi is connected
+  if (WiFi.status() == WL_CONNECTED) {
+    server.handleClient();
+  }
 }
 
-///////////////////////////////////////////////////////////////////
 void wificonnect() {
   unsigned long currentMillis = millis();
   wl_status_t currentStatus = WiFi.status();
 
-  // 1. Print when connected (Only once)
   if (currentStatus == WL_CONNECTED && lastConnectStatus == false) {
     Serial.println("\nWiFi Connected successfully");
     Serial.print("IP Address: ");
@@ -33,25 +46,20 @@ void wificonnect() {
     lastConnectStatus = true;
   }
 
-  // 2. Print when disconnected (Only once)
   if (currentStatus != WL_CONNECTED && lastConnectStatus == true) {
     Serial.println("\nWiFi Disconnected");
     lastConnectStatus = false;
   }
 
-  // 3. Reconnect logic
   if (currentStatus != WL_CONNECTED) {
     if (currentMillis - previousMillis >= interval) {
       previousMillis = currentMillis;
-
       Serial.print("Attempting to connect to: ");
       Serial.println(ssid);
       
-      // Stop the previous attempt to clear the "cannot set config" error
       WiFi.disconnect(); 
-      delay(10); // Very short pause for the driver
+      delay(10); 
       WiFi.begin(ssid, password);
     }
   }
 }
-
