@@ -1,35 +1,148 @@
 #include <WiFi.h>
-#include <WebServer.h> // Library for Local Host
+#include <WebServer.h>
+#include <ESPmDNS.h> // New Library
+#include <Wire.h>               // For I2C communication
+#include <Adafruit_Sensor.h>    // For DHT11
+#include <DHT.h>                // For DHT11
+#include <BH1750.h>             // For Light Sensor
+#include <Adafruit_ADS1X15.h>   // For ADS1115 Module
+#include <SPI.h>
+#include <SD.h>
+#include <FS.h>
+
+//define object
+DHT dht(4, DHT11);          // DHT11 connected to GPIO 4
+BH1750 lightMeter;          // BH1750 Light Sensor
+Adafruit_ADS1115 ads;       // ADS1115 Module
 
 const char* ssid = "Samsung galaxy s24";
 const char* password = "Dilshan@123456";
 
-// Create Web Server on port 80
 WebServer server(80);
 
 unsigned long previousMillis = 0;
 const long interval = 30000; 
 bool lastConnectStatus = false; 
 
-// Function to handle the website home page
+/////////////////////////////////////////////////////////////////////
 void handleRoot() {
-  server.send(200, "text/plain", "Hello! This is your ESP32 Local Host.");
+  String html = R"rawliteral(
+  <!DOCTYPE html><html><head>
+  <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    body { font-family: sans-serif; background-color: #1e1e2e; color: white; padding: 20px; }
+    .container { max-width: 900px; margin: auto; background: #2a2a3d; padding: 20px; border-radius: 10px; }
+    table { width: 100%; border-collapse: collapse; margin-bottom: 20px; }
+    th { text-align: left; padding: 10px; color: #fab387; font-size: 14px; border-bottom: 1px solid #45475a; }
+    td { padding: 10px; }
+    input, select { width: 90%; padding: 8px; border-radius: 5px; border: 1px solid #45475a; background: #313244; color: white; }
+    .btn { background: #a6e3a1; color: black; padding: 15px 30px; border: none; border-radius: 8px; font-weight: bold; cursor: pointer; width: 100%; font-size: 16px; }
+  </style>
+  </head><body>
+    <div class="container">
+      <h2>Research Configuration</h2>
+      <form action="/start">
+        <table>
+          <tr>
+            <th>Duration (min)</th>
+            <th>Time Gap (sec)</th>
+            <th>Target Plant Variety</th>
+            <th>Salinity Level</th>
+            <th>Faraday Cage</th>
+          </tr>
+          <tr>
+            <td><input type="number" name="dur" value="1"></td>
+            <td><input type="number" name="gap" value="5"></td>
+            <td>
+              <select name="var">
+                <option>KC1</option>
+                <option>Thilina</option>
+                <option>Local</option>
+              </select>
+            </td>
+            <td>
+              <select name="sal">
+                <option>0mM</option>
+                <option>50mM</option>
+                <option>100mM</option>
+              </select>
+            </td>
+            <td>
+              <select name="cage">
+                <option>Cage 1</option>
+                <option>Cage 2</option>
+              </select>
+            </td>
+          </tr>
+        </table>
+        <button type="submit" class="btn">START RESEARCH 🚀</button>
+      </form>
+    </div>
+  </body></html>)rawliteral";
+
+  server.send(200, "text/html", html);
+}
+////////////////////////////////////////////////////////////////////
+
+void handleStart() {
+  // 1. Get the values from the web page
+  String duration = server.arg("dur");
+  String gap = server.arg("gap");
+  String variety = server.arg("var");
+  String salinity = server.arg("sal");
+  String cage = server.arg("cage");
+
+  // 2. Print them to Serial Monitor to check
+  Serial.println("--- New Research Started ---");
+  Serial.println("Duration: " + duration + " min");
+  Serial.println("Variety: " + variety);
+  Serial.println("Salinity: " + salinity);
+
+  // 3. Create a header for the SD Card file
+  String dataHeader = "Duration,Gap,Variety,Salinity,Cage";
+  String dataValues = duration + "," + gap + "," + variety + "," + salinity + "," + cage;
+  
+  saveToSD(dataHeader);
+  saveToSD(dataValues);
+
+  server.send(200, "text/plain", "Research Started for " + variety + ". Recording data...");
 }
 
 void setup() {
+
   Serial.begin(115200);
-  WiFi.mode(WIFI_STA);
+  WiFi.mode(WIFI_STA);      //esp32 mode
   WiFi.begin(ssid, password);
 
-  // Define what happens when someone visits the IP address
+  //setup sensor
+  Wire.begin();             // Start I2C
+  dht.begin();              // Start DHT11
+  lightMeter.begin();       // Start BH1750
+  
+    if (!ads.begin()) {
+    Serial.println("Failed to initialize ADS1115.");
+  }
+
+  // Set the local URL name
+  if (MDNS.begin("tomato")) { 
+    Serial.println("mDNS started. URL: http://tomato.local");
+  }
   server.on("/", handleRoot);
-  server.begin(); // Start the server
+  server.on("/start", handleStart);
+  server.begin();
+
+  // Start SD Card (Change '5' to your CS pin if different)
+  if(!SD.begin(5)) {
+    Serial.println("SD Card Mount Failed!");
+  } else {
+    Serial.println("SD Card Initialized.");
+  }
+
 }
 
 void loop() {
   wificonnect();
   
-  // Only handle client requests if WiFi is connected
   if (WiFi.status() == WL_CONNECTED) {
     server.handleClient();
   }
@@ -39,6 +152,7 @@ void wificonnect() {
   unsigned long currentMillis = millis();
   wl_status_t currentStatus = WiFi.status();
 
+  // 1. Success Message
   if (currentStatus == WL_CONNECTED && lastConnectStatus == false) {
     Serial.println("\nWiFi Connected successfully");
     Serial.print("IP Address: ");
@@ -46,20 +160,67 @@ void wificonnect() {
     lastConnectStatus = true;
   }
 
+  // 2. Disconnect Message
   if (currentStatus != WL_CONNECTED && lastConnectStatus == true) {
     Serial.println("\nWiFi Disconnected");
     lastConnectStatus = false;
   }
 
+  // 3. Improved Reconnect logic
   if (currentStatus != WL_CONNECTED) {
     if (currentMillis - previousMillis >= interval) {
       previousMillis = currentMillis;
-      Serial.print("Attempting to connect to: ");
-      Serial.println(ssid);
-      
-      WiFi.disconnect(); 
-      delay(10); 
-      WiFi.begin(ssid, password);
+
+      // ONLY connect if NOT already trying (WL_IDLE_STATUS)
+      if (currentStatus != WL_IDLE_STATUS) { 
+        Serial.print("Attempting to connect to: ");
+        Serial.println(ssid);
+        
+        WiFi.disconnect(); 
+        delay(100); // Increased delay to 100ms to let the radio reset
+        WiFi.begin(ssid, password);
+      }
     }
   }
+}
+
+String getSensorData() {
+  // 1. Read DHT11
+  float h = dht.readHumidity();
+  float t = dht.readTemperature();
+
+  // 2. Read BH1750
+  float lux = lightMeter.readLightLevel();
+
+  // 3. Read ADS1115 (Soil & Electrode)
+  int16_t soilRaw = ads.readADC_SingleEnded(0); // Soil on A0
+  int16_t electRaw = ads.readADC_SingleEnded(1); // Electrode on A1
+
+  // Create a combined text string
+  String data = "Temp: " + String(t) + "C, ";
+  data += "Humidity: " + String(h) + "%, ";
+  data += "Light: " + String(lux) + " lx, ";
+  data += "Soil: " + String(soilRaw) + ", ";
+  data += "Electrode: " + String(electRaw);
+
+  return data;
+}
+
+void saveToSD(String data) {
+  // Open the file in APPEND mode (adds to the end of the file)
+  File file = SD.open("/data.csv", FILE_APPEND);
+  
+  if(!file) {
+    Serial.println("Failed to open file for appending");
+    return;
+  }
+  
+  // Write the data and a new line
+  if(file.println(data)) {
+    Serial.println("Data saved to SD card");
+  } else {
+    Serial.println("Save failed");
+  }
+  
+  file.close(); // Always close the file!
 }
