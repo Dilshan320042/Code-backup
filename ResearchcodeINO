@@ -63,17 +63,12 @@ struct CageState {
 CageState cage1 = {"Cage1", false, false, 0, 0, 0, 0, 0, 0, "", "", ""};
 CageState cage2 = {"Cage2", false, false, 0, 0, 0, 0, 0, 0, "", "", ""};
 
-struct FileInfo { String name; uint32_t fTime; };
-
 // --- 5. POWER LOGIC HELPER ---
 void updateSystemPower() {
-  // If ANY cage is actively collecting data (Running) -> Battery Mode (Pin LOW)
   if (cage1.isRunning || cage2.isRunning) {
-    digitalWrite(POWER_SWITCH_PIN, LOW); 
-  } 
-  // If Idle or just Waiting (Delay) -> Adapter Mode (Pin HIGH)
-  else {
-    digitalWrite(POWER_SWITCH_PIN, HIGH);
+    digitalWrite(POWER_SWITCH_PIN, LOW); // Battery Mode
+  } else {
+    digitalWrite(POWER_SWITCH_PIN, HIGH); // Adapter Mode
   }
 }
 
@@ -108,48 +103,112 @@ void wificonnect() {
 
 // --- 6. WEB HANDLERS ---
 void handleRoot() {
-  String html = R"rawliteral(<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1"><style>body { font-family: 'Segoe UI', sans-serif; background: #11111b; margin: 0; padding: 20px; color: #cdd6f4; }.card { background: #1e1e2e; max-width: 700px; margin: auto; padding: 25px; border-radius: 15px; border-top: 5px solid #fab387; box-shadow: 0 10px 30px rgba(0,0,0,0.5); }.header { color: #fab387; font-size: 22px; font-weight: bold; margin-bottom: 20px; text-align: center; }.grid { display: grid; grid-template-columns: 1fr 1fr; gap: 15px; }label { font-size: 13px; color: #a6adc8; font-weight: 600; display: block; margin-bottom: 5px; }input, select { width: 100%; padding: 10px; border: 1px solid #45475a; border-radius: 8px; background: #313244; color: #cdd6f4; box-sizing: border-box; }.btn { background: #a6e3a1; color: #11111b; border: none; padding: 14px; border-radius: 8px; font-size: 16px; font-weight: bold; cursor: pointer; width:100%; margin-top:15px; }.btn-stop { background: #f38ba8; margin-top: 10px; }.file-list { border: 1px solid #45475a; border-radius: 8px; max-height: 200px; overflow-y: auto; background: #181825; margin-top: 10px; }.file-item { display: flex; justify-content: space-between; padding: 10px; border-bottom: 1px solid #313244; font-size: 13px; }.down { color: #89b4fa; text-decoration: none; font-weight: bold; }.del { color: #f38ba8; text-decoration: none; margin-left: 10px; cursor: pointer; }.log-box { background: #11111b; color: #a6e3a1; padding: 15px; border-radius: 10px; height: 180px; overflow-y: auto; font-family: monospace; font-size: 12px; margin-top: 25px; border: 1px solid #45475a; }</style></head><body><div class="card"><div class="header">System Configuration</div><form action="/start"><div class="grid"><div><label>Select Cage</label><select name="cage"><option>Cage 1</option><option>Cage 2</option></select></div><div><label>Start Delay (min)</label><input type="number" name="delay" value="0"></div><div><label>Duration (min)</label><input type="number" name="dur" value="1"></div><div><label>Time Gap (sec)</label><input type="number" name="gap" value="5"></div><div><label>Plant Variety</label><select name="var"><option>KC1</option><option>Thilina</option><option>Local</option></select></div><div><label>Salinity Level</label><select name="sal"><option>0mM</option><option>50mM</option><option>100mM</option></select></div></div><button type="submit" class="btn">Get Data Now 🚀</button></form><a href="/stop" style="text-decoration:none;"><button class="btn btn-stop">Emergency Stop 🛑</button></a><div style="margin-top:20px; font-weight:bold; font-size:14px;">📂 Stored Files (Newest Top)</div><div class="file-list">)rawliteral";
-  std::vector<FileInfo> files;
+  String html = R"rawliteral(<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1"><style>
+  .corner-circles { position: fixed; top: 10px; left: 0; right: 0; display: flex; justify-content: space-between; padding: 0 20px; pointer-events: none; z-index: 100; }
+  .c-box { pointer-events: auto; background: #1e1e2e; padding: 10px; border-radius: 12px; border: 1px solid #45475a; text-align: center; width: 70px; }
+  .c-circle { width: 50px; height: 50px; border-radius: 50%; background: conic-gradient(#a6e3a1 0%, #313244 0%); display: flex; align-items: center; justify-content: center; margin: auto; position: relative; }
+  .c-circle::after { content: ""; position: absolute; width: 40px; height: 40px; background: #1e1e2e; border-radius: 50%; }
+  .c-perc { position: relative; z-index: 10; font-size: 11px; font-weight: bold; color: #a6e3a1; }
+  .c-label { font-size: 10px; color: #a6adc8; margin-top: 4px; }
+  body { font-family: 'Segoe UI', sans-serif; background: #11111b; margin: 0; padding: 20px; color: #cdd6f4; }
+  .card { background: #1e1e2e; max-width: 700px; margin: auto; padding: 25px; border-radius: 15px; border-top: 5px solid #fab387; box-shadow: 0 10px 30px rgba(0,0,0,0.5); }
+  .header { color: #fab387; font-size: 22px; font-weight: bold; margin-bottom: 20px; text-align: center; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 15px; }
+  label { font-size: 13px; color: #a6adc8; font-weight: 600; display: block; margin-bottom: 5px; }
+  input, select { width: 100%; padding: 10px; border: 1px solid #45475a; border-radius: 8px; background: #313244; color: #cdd6f4; box-sizing: border-box; }
+  .btn { background: #a6e3a1; color: #11111b; border: none; padding: 14px; border-radius: 8px; font-size: 16px; font-weight: bold; cursor: pointer; width:100%; margin-top:15px; }
+  .btn-stop { background: #f38ba8; margin-top: 10px; }
+  .file-list { border: 1px solid #45475a; border-radius: 8px; max-height: 200px; overflow-y: auto; background: #181825; margin-top: 10px; }
+  .file-item { display: flex; justify-content: space-between; padding: 10px; border-bottom: 1px solid #313244; font-size: 13px; }
+  .down { color: #89b4fa; text-decoration: none; font-weight: bold; }
+  .del { color: #f38ba8; text-decoration: none; margin-left: 10px; cursor: pointer; }
+  .log-box { background: #11111b; color: #a6e3a1; padding: 15px; border-radius: 10px; height: 180px; overflow-y: auto; font-family: monospace; font-size: 12px; margin-top: 25px; border: 1px solid #45475a; }
+  </style></head><body>
+  <div class="corner-circles">
+    <div class="c-box"><div id="c1" class="c-circle"><span id="p1" class="c-perc">0%</span></div><div class="c-label">Cage 1</div></div>
+    <div class="c-box"><div id="c2" class="c-circle"><span id="p2" class="c-perc">0%</span></div><div class="c-label">Cage 2</div></div>
+  </div>
+  <div class="card"><div class="header">System Configuration</div><form action="/start">
+  <div class="grid">
+  <div><label>Select Cage</label><select name="cage"><option>Cage 1</option><option>Cage 2</option></select></div>
+  <div><label>Start Delay (min)</label><input type="number" name="delay" value="0"></div>
+  <div><label>Duration (min)</label><input type="number" name="dur" value="1"></div>
+  <div><label>Time Gap (sec)</label><input type="number" name="gap" value="1"></div>
+  <div><label>Plant Variety</label><select name="var"><option>KC1</option><option>Thilina</option><option>Local</option></select></div>
+  <div><label>Salinity Level</label><select name="sal"><option>0mM</option><option>50mM</option><option>100mM</option></select></div>
+  </div><button type="submit" class="btn">Get Data Now 🚀</button></form>
+  <a href="/stop" style="text-decoration:none;"><button class="btn btn-stop">Emergency Stop 🛑</button></a>
+  <div style="margin-top:20px; font-weight:bold; font-size:14px;">📂 Stored Files (Newest Top)</div><div class="file-list">)rawliteral";
+  
+  // Sorting by Name Reverse (Alphabetical)
+  std::vector<String> files;
   File root = SD.open("/");
-  File file = root.openNextFile();
-  while(file){ if(!file.isDirectory()){ files.push_back({String(file.name()), file.getLastWrite()}); } file = root.openNextFile(); }
-  std::sort(files.begin(), files.end(), [](const FileInfo& a, const FileInfo& b) { return a.fTime > b.fTime; });
-  for (const auto& f : files) { html += "<div class='file-item'><span>" + f.name + "</span><div><a href='/download?f=/" + f.name + "' class='down'>Download</a><a href='#' onclick='confirmDelete(\"/delete?f=/" + f.name + "\")' class='del'>Delete</a></div></div>"; }
-  html += R"rawliteral(</div><div class="log-box" id="logs">Loading logs...</div></div><script>function confirmDelete(url) { if (confirm("Delete this file?")) { window.location.href = url; } }setInterval(() => { fetch('/logs').then(r=>r.text()).then(t=>{ document.getElementById('logs').innerHTML=t; }); }, 2000);</script></body></html>)rawliteral";
+  File f = root.openNextFile();
+  while(f){ if(!f.isDirectory()){ files.push_back(String(f.name())); } f = root.openNextFile(); }
+  std::sort(files.begin(), files.end(), std::greater<String>());
+
+  for (const auto& fileName : files) { 
+    html += "<div class='file-item'><span>" + fileName + "</span><div>";
+    html += "<a href='/download?f=/" + fileName + "' class='down'>Download</a>";
+    html += "<a href='#' onclick='confirmDelete(\"/delete?f=/" + fileName + "\")' class='del'>Delete</a></div></div>"; 
+  }
+  
+  html += R"rawliteral(</div><div class="log-box" id="logs">Loading logs...</div></div><script>
+  function confirmDelete(url) { if (confirm("Delete this file?")) { window.location.href = url; } }
+  function updateUI() {
+    fetch('/logs').then(r=>r.text()).then(t=>{ document.getElementById('logs').innerHTML = t; });
+    fetch('/status').then(r=>r.json()).then(j=>{
+      document.getElementById('p1').innerText = j.p1 + '%';
+      document.getElementById('c1').style.background = `conic-gradient(#a6e3a1 ${j.p1}%, #313244 0%)`;
+      document.getElementById('p2').innerText = j.p2 + '%';
+      document.getElementById('c2').style.background = `conic-gradient(#a6e3a1 ${j.p2}%, #313244 0%)`;
+    });
+  }
+  setInterval(updateUI, 2000);
+  </script></body></html>)rawliteral";
   server.send(200, "text/html", html);
 }
 
 void handleStart() {
   String cName = server.arg("cage");
   CageState &c = (cName == "Cage 1") ? cage1 : cage2;
-  c.isRunning = false; c.isWaiting = false; // Reset
+  
+  // FORCE RESET everything first
+  c.isRunning = false; 
+  c.isWaiting = false;
+  c.lastSampleTime = 0;
+  c.lastCountdownMsg = 0;
+  
   int dMin = server.arg("delay").toInt();
   c.durationMin = server.arg("dur").toInt();
   c.timeGapSec = server.arg("gap").toInt();
   c.variety = server.arg("var");
   c.salinity = server.arg("sal");
 
+  // Create unique filename
   DateTime now = rtc.now();
   char baseBuf[64];
   sprintf(baseBuf, "/%04d-%02d-%02d_%s_%s_%s", now.year(), now.month(), now.day(), c.name.c_str(), c.variety.c_str(), c.salinity.c_str());
   String finalFileName = String(baseBuf) + ".csv";
   int counter = 1;
-  while (SD.exists(finalFileName)) { finalFileName = String(baseBuf) + "_" + String(counter) + ".csv"; counter++; }
+  while (SD.exists(finalFileName)) { 
+    finalFileName = String(baseBuf) + "_" + String(counter) + ".csv"; 
+    counter++; 
+  }
   c.currentFileName = finalFileName;
 
   unsigned long currentMillis = millis();
-  c.lastSampleTime = 0;
-  c.lastCountdownMsg = 0;
 
   if(dMin > 0) {
     c.isWaiting = true;
-    c.startTime = currentMillis + (unsigned long)(dMin * 60000);
-    addWebLog("[" + c.name + "] DELAY: " + String(dMin) + " min. (Adapter Mode)");
+    c.startTime = currentMillis + ((unsigned long)dMin * 60000);
+    addWebLog("[" + c.name + "] DELAY ACTIVE: " + String(dMin) + " min.");
   } else {
     c.isRunning = true;
-    c.endTime = currentMillis + (unsigned long)(c.durationMin * 60000);
-    addWebLog("Started: " + c.currentFileName + " (Battery Mode)");
+    c.endTime = currentMillis + ((unsigned long)c.durationMin * 60000);
+    addWebLog("Started: " + c.currentFileName);
   }
+
   updateSystemPower();
   server.sendHeader("Location", "/");
   server.send(303);
@@ -159,7 +218,7 @@ void handleStop() {
   cage1.isRunning = false; cage1.isWaiting = false;
   cage2.isRunning = false; cage2.isWaiting = false;
   updateSystemPower();
-  addWebLog("SYSTEM STOPPED. (Adapter Mode)");
+  addWebLog("SYSTEM STOPPED.");
   server.sendHeader("Location", "/");
   server.send(303);
 }
@@ -167,7 +226,6 @@ void handleStop() {
 void handleDownload() { File f = SD.open(server.arg("f"), FILE_READ); if(f) { server.streamFile(f, "text/csv"); f.close(); } }
 void handleDelete() { SD.remove(server.arg("f")); server.sendHeader("Location", "/"); server.send(303); }
 
-// --- 7. CORE LOGIC ---
 void collectData(CageState &c, int cageNum) {
   if (c.isWaiting) {
     if (millis() >= c.startTime) {
@@ -175,25 +233,21 @@ void collectData(CageState &c, int cageNum) {
       c.isRunning = true;
       c.endTime = millis() + (c.durationMin * 60000);
       updateSystemPower();
-      addWebLog("[" + c.name + "] DELAY OVER. Switching to Battery...");
-    } 
-    else if (millis() - c.lastCountdownMsg >= 10000) { 
+      addWebLog("[" + c.name + "] DELAY OVER. Recording...");
+    } else if (millis() - c.lastCountdownMsg >= 10000) {
       c.lastCountdownMsg = millis();
       long rem = (c.startTime - millis()) / 1000;
-      addWebLog("[" + c.name + "] WAITING: " + String(rem/60) + "m " + String(rem%60) + "s.");
+      addWebLog("[" + c.name + "] WAIT: " + String(rem/60) + "m " + String(rem%60) + "s.");
     }
     return;
   }
-
   if (!c.isRunning) return;
-  
   if (millis() > c.endTime) {
     c.isRunning = false;
     addWebLog("[" + c.name + "] COMPLETED.");
     updateSystemPower();
     return;
   }
-
   if (millis() - c.lastSampleTime >= (c.timeGapSec * 1000)) {
     c.lastSampleTime = millis();
     DateTime now = rtc.now();
@@ -201,16 +255,18 @@ void collectData(CageState &c, int cageNum) {
     
     float t = (cageNum == 1) ? dht1.readTemperature() : dht2.readTemperature();
     float h = (cageNum == 1) ? dht1.readHumidity() : dht2.readHumidity();
+    
+    // SENSOR ADDRESS MAPPING
+    // Cage 1 = 0x5C (3.3V Pin), Cage 2 = 0x23 (Empty)
     float l = (cageNum == 1) ? lightMeter1.readLightLevel() : lightMeter2.readLightLevel();
+    
     int re = (cageNum == 1) ? ads.readADC_SingleEnded(0) : ads.readADC_SingleEnded(1);
     int rs = (cageNum == 1) ? ads.readADC_SingleEnded(2) : ads.readADC_SingleEnded(3);
-
     File f = SD.open(c.currentFileName, FILE_APPEND);
     if (f) {
       if (f.size() == 0) f.println("Time,Variety,Salinity,Temp,Hum,Lux,ElecMV,SoilMV");
       f.printf("%s,%s,%s,%.1f,%.1f,%.0f,%.1f,%.1f\n", ts.c_str(), c.variety.c_str(), c.salinity.c_str(), t, h, l, re*0.125, rs*0.125);
       f.close();
-      // EXACT FORMAT REQUESTED:
       String msg = "[" + c.name + "] " + ts + " | Temp:" + String(t,1) + " Hum:" + String(h,0) + "% Sal:" + c.salinity + " Lux:" + String(l,0) + " Elec:" + String(re*0.125,0) + "mV";
       addWebLog(msg);
     }
@@ -221,18 +277,18 @@ void setup() {
   Serial.begin(115200);
   pinMode(BUILTIN_LED, OUTPUT);
   pinMode(POWER_SWITCH_PIN, OUTPUT); 
-  digitalWrite(POWER_SWITCH_PIN, HIGH); // Start in Adapter Mode
-  
+  digitalWrite(POWER_SWITCH_PIN, HIGH); 
   Wire.begin(I2C_SDA, I2C_SCL); 
   rtc.begin(); dht1.begin(); dht2.begin(); ads.begin();
-  lightMeter1.begin(BH1750::CONTINUOUS_HIGH_RES_MODE, 0x23, &Wire);
-  lightMeter2.begin(BH1750::CONTINUOUS_HIGH_RES_MODE, 0x5C, &Wire);
-  
+
+  // BH1750 SETUP: Sensor 1 (0x5C) has 3.3V connection. Sensor 2 (0x23) is default.
+  lightMeter1.begin(BH1750::CONTINUOUS_HIGH_RES_MODE, 0x5C, &Wire);
+  lightMeter2.begin(BH1750::CONTINUOUS_HIGH_RES_MODE, 0x23, &Wire);
+
   SPI.begin(SD_SCK, SD_MISO, SD_MOSI, SD_CS); 
   SD.begin(SD_CS);
   WiFi.begin(ssid, password);
   MDNS.begin("tomato");
-  
   server.on("/", handleRoot);
   server.on("/start", handleStart);
   server.on("/stop", handleStop);
@@ -246,6 +302,23 @@ void setup() {
     }
     server.send(200, "text/plain", l);
   });
+  
+  server.on("/status", [](){
+    auto getPerc = [](CageState &c) {
+      if (c.isRunning) {
+        if (millis() >= c.endTime) return 100;
+        unsigned long total = (unsigned long)c.durationMin * 60000;
+        unsigned long elapsed = millis() - (c.endTime - total);
+        int p = (int)((elapsed * 100) / total);
+        return (p > 100) ? 100 : (p < 0 ? 0 : p);
+      }
+      int lastIdx = (webLogIndex + MAX_WEB_LOGS - 1) % MAX_WEB_LOGS;
+      if (webLogs[lastIdx].indexOf("COMPLETED") != -1 && webLogs[lastIdx].indexOf(c.name) != -1) return 100;
+      return 0;
+    };
+    server.send(200, "application/json", "{\"p1\":" + String(getPerc(cage1)) + ",\"p2\":" + String(getPerc(cage2)) + "}");
+  });
+  
   server.begin();
 }
 
