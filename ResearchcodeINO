@@ -1,0 +1,57 @@
+#include <WiFi.h>
+
+const char* ssid = "Samsung galaxy s24";
+const char* password = "Dilshan@123456";
+
+unsigned long previousMillis = 0;
+const long interval = 30000; // wifi reconnect delay time 30s
+bool lastConnectStatus = false; 
+
+//////////////////////////////////////////////////////////////////
+void setup() {
+  Serial.begin(115200);
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(ssid, password);
+}
+
+///////////////////////////////////////////////////////////////////
+void loop() {
+  wificonnect();
+  
+}
+
+///////////////////////////////////////////////////////////////////
+void wificonnect() {
+  unsigned long currentMillis = millis();
+  wl_status_t currentStatus = WiFi.status();
+
+  // 1. Print when connected (Only once)
+  if (currentStatus == WL_CONNECTED && lastConnectStatus == false) {
+    Serial.println("\nWiFi Connected successfully");
+    Serial.print("IP Address: ");
+    Serial.println(WiFi.localIP());
+    lastConnectStatus = true;
+  }
+
+  // 2. Print when disconnected (Only once)
+  if (currentStatus != WL_CONNECTED && lastConnectStatus == true) {
+    Serial.println("\nWiFi Disconnected");
+    lastConnectStatus = false;
+  }
+
+  // 3. Reconnect logic
+  if (currentStatus != WL_CONNECTED) {
+    if (currentMillis - previousMillis >= interval) {
+      previousMillis = currentMillis;
+
+      Serial.print("Attempting to connect to: ");
+      Serial.println(ssid);
+      
+      // Stop the previous attempt to clear the "cannot set config" error
+      WiFi.disconnect(); 
+      delay(10); // Very short pause for the driver
+      WiFi.begin(ssid, password);
+    }
+  }
+}
+
