@@ -1,226 +1,257 @@
-#include <WiFi.h>
-#include <WebServer.h>
-#include <ESPmDNS.h> // New Library
-#include <Wire.h>               // For I2C communication
-#include <Adafruit_Sensor.h>    // For DHT11
-#include <DHT.h>                // For DHT11
-#include <BH1750.h>             // For Light Sensor
-#include <Adafruit_ADS1X15.h>   // For ADS1115 Module
+#include <Wire.h>
 #include <SPI.h>
 #include <SD.h>
-#include <FS.h>
+#include <DHT.h>
+#include <Adafruit_ADS1X15.h>
+#include <BH1750.h>
+#include <RTClib.h>
+#include <WiFi.h>
+#include <ESPmDNS.h> 
+#include <WebServer.h>
+#include <vector>
+#include <algorithm>
 
-//define object
-DHT dht(4, DHT11);          // DHT11 connected to GPIO 4
-BH1750 lightMeter;          // BH1750 Light Sensor
-Adafruit_ADS1115 ads;       // ADS1115 Module
-
+// --- 1. NETWORK & SYSTEM CONFIG ---
 const char* ssid = "Samsung galaxy s24";
 const char* password = "Dilshan@123456";
-
-WebServer server(80);
-
 unsigned long previousMillis = 0;
 const long interval = 30000; 
 bool lastConnectStatus = false; 
 
-/////////////////////////////////////////////////////////////////////
-void handleRoot() {
-  String html = R"rawliteral(
-  <!DOCTYPE html><html><head>
-  <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-  <style>
-    body { font-family: sans-serif; background-color: #1e1e2e; color: white; padding: 20px; }
-    .container { max-width: 900px; margin: auto; background: #2a2a3d; padding: 20px; border-radius: 10px; }
-    table { width: 100%; border-collapse: collapse; margin-bottom: 20px; }
-    th { text-align: left; padding: 10px; color: #fab387; font-size: 14px; border-bottom: 1px solid #45475a; }
-    td { padding: 10px; }
-    input, select { width: 90%; padding: 8px; border-radius: 5px; border: 1px solid #45475a; background: #313244; color: white; }
-    .btn { background: #a6e3a1; color: black; padding: 15px 30px; border: none; border-radius: 8px; font-weight: bold; cursor: pointer; width: 100%; font-size: 16px; }
-  </style>
-  </head><body>
-    <div class="container">
-      <h2>Research Configuration</h2>
-      <form action="/start">
-        <table>
-          <tr>
-            <th>Duration (min)</th>
-            <th>Time Gap (sec)</th>
-            <th>Target Plant Variety</th>
-            <th>Salinity Level</th>
-            <th>Faraday Cage</th>
-          </tr>
-          <tr>
-            <td><input type="number" name="dur" value="1"></td>
-            <td><input type="number" name="gap" value="5"></td>
-            <td>
-              <select name="var">
-                <option>KC1</option>
-                <option>Thilina</option>
-                <option>Local</option>
-              </select>
-            </td>
-            <td>
-              <select name="sal">
-                <option>0mM</option>
-                <option>50mM</option>
-                <option>100mM</option>
-              </select>
-            </td>
-            <td>
-              <select name="cage">
-                <option>Cage 1</option>
-                <option>Cage 2</option>
-              </select>
-            </td>
-          </tr>
-        </table>
-        <button type="submit" class="btn">START RESEARCH 🚀</button>
-      </form>
-    </div>
-  </body></html>)rawliteral";
+// --- 2. HARDWARE PINS ---
+#define I2C_SDA 8
+#define I2C_SCL 9
+#define SD_CS 10
+#define SD_MOSI 11
+#define SD_MISO 13
+#define SD_SCK 12
+#define DHT1_PIN 4
+#define DHT2_PIN 6
+#define DHTTYPE DHT11
+#define POWER_SWITCH_PIN 5 
+#define BUILTIN_LED 2 
 
-  server.send(200, "text/html", html);
-}
-////////////////////////////////////////////////////////////////////
+// --- 3. OBJECTS ---
+DHT dht1(DHT1_PIN, DHTTYPE);
+DHT dht2(DHT2_PIN, DHTTYPE);
+Adafruit_ADS1115 ads; 
+BH1750 lightMeter1; 
+BH1750 lightMeter2; 
+RTC_DS3231 rtc;
+WebServer server(80); 
 
-void handleStart() {
-  // 1. Get the values from the web page
-  String duration = server.arg("dur");
-  String gap = server.arg("gap");
-  String variety = server.arg("var");
-  String salinity = server.arg("sal");
-  String cage = server.arg("cage");
+// --- 4. SYSTEM STATE ---
+#define MAX_WEB_LOGS 15
+String webLogs[MAX_WEB_LOGS];
+int webLogIndex = 0;
 
-  // 2. Print them to Serial Monitor to check
-  Serial.println("--- New Research Started ---");
-  Serial.println("Duration: " + duration + " min");
-  Serial.println("Variety: " + variety);
-  Serial.println("Salinity: " + salinity);
+struct CageState {
+  String name;
+  bool isRunning;
+  bool isWaiting;
+  unsigned long startTime; 
+  unsigned long endTime;   
+  unsigned long lastSampleTime;
+  unsigned long lastCountdownMsg;
+  int durationMin;
+  int timeGapSec;
+  String variety;
+  String salinity;
+  String currentFileName; 
+};
 
-  // 3. Create a header for the SD Card file
-  String dataHeader = "Duration,Gap,Variety,Salinity,Cage";
-  String dataValues = duration + "," + gap + "," + variety + "," + salinity + "," + cage;
-  
-  saveToSD(dataHeader);
-  saveToSD(dataValues);
+CageState cage1 = {"Cage1", false, false, 0, 0, 0, 0, 0, 0, "", "", ""};
+CageState cage2 = {"Cage2", false, false, 0, 0, 0, 0, 0, 0, "", "", ""};
 
-  server.send(200, "text/plain", "Research Started for " + variety + ". Recording data...");
+struct FileInfo { String name; uint32_t fTime; };
+
+// --- 5. POWER LOGIC HELPER ---
+void updateSystemPower() {
+  // If ANY cage is actively collecting data (Running) -> Battery Mode (Pin LOW)
+  if (cage1.isRunning || cage2.isRunning) {
+    digitalWrite(POWER_SWITCH_PIN, LOW); 
+  } 
+  // If Idle or just Waiting (Delay) -> Adapter Mode (Pin HIGH)
+  else {
+    digitalWrite(POWER_SWITCH_PIN, HIGH);
+  }
 }
 
-void setup() {
-
-  Serial.begin(115200);
-  WiFi.mode(WIFI_STA);      //esp32 mode
-  WiFi.begin(ssid, password);
-
-  //setup sensor
-  Wire.begin();             // Start I2C
-  dht.begin();              // Start DHT11
-  lightMeter.begin();       // Start BH1750
-  
-    if (!ads.begin()) {
-    Serial.println("Failed to initialize ADS1115.");
-  }
-
-  // Set the local URL name
-  if (MDNS.begin("tomato")) { 
-    Serial.println("mDNS started. URL: http://tomato.local");
-  }
-  server.on("/", handleRoot);
-  server.on("/start", handleStart);
-  server.begin();
-
-  // Start SD Card (Change '5' to your CS pin if different)
-  if(!SD.begin(5)) {
-    Serial.println("SD Card Mount Failed!");
-  } else {
-    Serial.println("SD Card Initialized.");
-  }
-
-}
-
-void loop() {
-  wificonnect();
-  
-  if (WiFi.status() == WL_CONNECTED) {
-    server.handleClient();
-  }
+void addWebLog(String msg) {
+  webLogs[webLogIndex] = msg + "<br>";
+  webLogIndex = (webLogIndex + 1) % MAX_WEB_LOGS;
+  Serial.println(msg); 
 }
 
 void wificonnect() {
   unsigned long currentMillis = millis();
   wl_status_t currentStatus = WiFi.status();
-
-  // 1. Success Message
   if (currentStatus == WL_CONNECTED && lastConnectStatus == false) {
-    Serial.println("\nWiFi Connected successfully");
-    Serial.print("IP Address: ");
-    Serial.println(WiFi.localIP());
+    addWebLog("WiFi Connected: " + WiFi.localIP().toString());
     lastConnectStatus = true;
   }
-
-  // 2. Disconnect Message
   if (currentStatus != WL_CONNECTED && lastConnectStatus == true) {
-    Serial.println("\nWiFi Disconnected");
+    addWebLog("SYSTEM: WiFi Connection Lost.");
     lastConnectStatus = false;
   }
-
-  // 3. Improved Reconnect logic
   if (currentStatus != WL_CONNECTED) {
     if (currentMillis - previousMillis >= interval) {
       previousMillis = currentMillis;
-
-      // ONLY connect if NOT already trying (WL_IDLE_STATUS)
       if (currentStatus != WL_IDLE_STATUS) { 
-        Serial.print("Attempting to connect to: ");
-        Serial.println(ssid);
-        
         WiFi.disconnect(); 
-        delay(100); // Increased delay to 100ms to let the radio reset
+        delay(100); 
         WiFi.begin(ssid, password);
       }
     }
   }
 }
 
-String getSensorData() {
-  // 1. Read DHT11
-  float h = dht.readHumidity();
-  float t = dht.readTemperature();
-
-  // 2. Read BH1750
-  float lux = lightMeter.readLightLevel();
-
-  // 3. Read ADS1115 (Soil & Electrode)
-  int16_t soilRaw = ads.readADC_SingleEnded(0); // Soil on A0
-  int16_t electRaw = ads.readADC_SingleEnded(1); // Electrode on A1
-
-  // Create a combined text string
-  String data = "Temp: " + String(t) + "C, ";
-  data += "Humidity: " + String(h) + "%, ";
-  data += "Light: " + String(lux) + " lx, ";
-  data += "Soil: " + String(soilRaw) + ", ";
-  data += "Electrode: " + String(electRaw);
-
-  return data;
+// --- 6. WEB HANDLERS ---
+void handleRoot() {
+  String html = R"rawliteral(<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1"><style>body { font-family: 'Segoe UI', sans-serif; background: #11111b; margin: 0; padding: 20px; color: #cdd6f4; }.card { background: #1e1e2e; max-width: 700px; margin: auto; padding: 25px; border-radius: 15px; border-top: 5px solid #fab387; box-shadow: 0 10px 30px rgba(0,0,0,0.5); }.header { color: #fab387; font-size: 22px; font-weight: bold; margin-bottom: 20px; text-align: center; }.grid { display: grid; grid-template-columns: 1fr 1fr; gap: 15px; }label { font-size: 13px; color: #a6adc8; font-weight: 600; display: block; margin-bottom: 5px; }input, select { width: 100%; padding: 10px; border: 1px solid #45475a; border-radius: 8px; background: #313244; color: #cdd6f4; box-sizing: border-box; }.btn { background: #a6e3a1; color: #11111b; border: none; padding: 14px; border-radius: 8px; font-size: 16px; font-weight: bold; cursor: pointer; width:100%; margin-top:15px; }.btn-stop { background: #f38ba8; margin-top: 10px; }.file-list { border: 1px solid #45475a; border-radius: 8px; max-height: 200px; overflow-y: auto; background: #181825; margin-top: 10px; }.file-item { display: flex; justify-content: space-between; padding: 10px; border-bottom: 1px solid #313244; font-size: 13px; }.down { color: #89b4fa; text-decoration: none; font-weight: bold; }.del { color: #f38ba8; text-decoration: none; margin-left: 10px; cursor: pointer; }.log-box { background: #11111b; color: #a6e3a1; padding: 15px; border-radius: 10px; height: 180px; overflow-y: auto; font-family: monospace; font-size: 12px; margin-top: 25px; border: 1px solid #45475a; }</style></head><body><div class="card"><div class="header">System Configuration</div><form action="/start"><div class="grid"><div><label>Select Cage</label><select name="cage"><option>Cage 1</option><option>Cage 2</option></select></div><div><label>Start Delay (min)</label><input type="number" name="delay" value="0"></div><div><label>Duration (min)</label><input type="number" name="dur" value="1"></div><div><label>Time Gap (sec)</label><input type="number" name="gap" value="5"></div><div><label>Plant Variety</label><select name="var"><option>KC1</option><option>Thilina</option><option>Local</option></select></div><div><label>Salinity Level</label><select name="sal"><option>0mM</option><option>50mM</option><option>100mM</option></select></div></div><button type="submit" class="btn">Get Data Now 🚀</button></form><a href="/stop" style="text-decoration:none;"><button class="btn btn-stop">Emergency Stop 🛑</button></a><div style="margin-top:20px; font-weight:bold; font-size:14px;">📂 Stored Files (Newest Top)</div><div class="file-list">)rawliteral";
+  std::vector<FileInfo> files;
+  File root = SD.open("/");
+  File file = root.openNextFile();
+  while(file){ if(!file.isDirectory()){ files.push_back({String(file.name()), file.getLastWrite()}); } file = root.openNextFile(); }
+  std::sort(files.begin(), files.end(), [](const FileInfo& a, const FileInfo& b) { return a.fTime > b.fTime; });
+  for (const auto& f : files) { html += "<div class='file-item'><span>" + f.name + "</span><div><a href='/download?f=/" + f.name + "' class='down'>Download</a><a href='#' onclick='confirmDelete(\"/delete?f=/" + f.name + "\")' class='del'>Delete</a></div></div>"; }
+  html += R"rawliteral(</div><div class="log-box" id="logs">Loading logs...</div></div><script>function confirmDelete(url) { if (confirm("Delete this file?")) { window.location.href = url; } }setInterval(() => { fetch('/logs').then(r=>r.text()).then(t=>{ document.getElementById('logs').innerHTML=t; }); }, 2000);</script></body></html>)rawliteral";
+  server.send(200, "text/html", html);
 }
 
-void saveToSD(String data) {
-  // Open the file in APPEND mode (adds to the end of the file)
-  File file = SD.open("/data.csv", FILE_APPEND);
-  
-  if(!file) {
-    Serial.println("Failed to open file for appending");
+void handleStart() {
+  String cName = server.arg("cage");
+  CageState &c = (cName == "Cage 1") ? cage1 : cage2;
+  c.isRunning = false; c.isWaiting = false; // Reset
+  int dMin = server.arg("delay").toInt();
+  c.durationMin = server.arg("dur").toInt();
+  c.timeGapSec = server.arg("gap").toInt();
+  c.variety = server.arg("var");
+  c.salinity = server.arg("sal");
+
+  DateTime now = rtc.now();
+  char baseBuf[64];
+  sprintf(baseBuf, "/%04d-%02d-%02d_%s_%s_%s", now.year(), now.month(), now.day(), c.name.c_str(), c.variety.c_str(), c.salinity.c_str());
+  String finalFileName = String(baseBuf) + ".csv";
+  int counter = 1;
+  while (SD.exists(finalFileName)) { finalFileName = String(baseBuf) + "_" + String(counter) + ".csv"; counter++; }
+  c.currentFileName = finalFileName;
+
+  unsigned long currentMillis = millis();
+  c.lastSampleTime = 0;
+  c.lastCountdownMsg = 0;
+
+  if(dMin > 0) {
+    c.isWaiting = true;
+    c.startTime = currentMillis + (unsigned long)(dMin * 60000);
+    addWebLog("[" + c.name + "] DELAY: " + String(dMin) + " min. (Adapter Mode)");
+  } else {
+    c.isRunning = true;
+    c.endTime = currentMillis + (unsigned long)(c.durationMin * 60000);
+    addWebLog("Started: " + c.currentFileName + " (Battery Mode)");
+  }
+  updateSystemPower();
+  server.sendHeader("Location", "/");
+  server.send(303);
+}
+
+void handleStop() {
+  cage1.isRunning = false; cage1.isWaiting = false;
+  cage2.isRunning = false; cage2.isWaiting = false;
+  updateSystemPower();
+  addWebLog("SYSTEM STOPPED. (Adapter Mode)");
+  server.sendHeader("Location", "/");
+  server.send(303);
+}
+
+void handleDownload() { File f = SD.open(server.arg("f"), FILE_READ); if(f) { server.streamFile(f, "text/csv"); f.close(); } }
+void handleDelete() { SD.remove(server.arg("f")); server.sendHeader("Location", "/"); server.send(303); }
+
+// --- 7. CORE LOGIC ---
+void collectData(CageState &c, int cageNum) {
+  if (c.isWaiting) {
+    if (millis() >= c.startTime) {
+      c.isWaiting = false;
+      c.isRunning = true;
+      c.endTime = millis() + (c.durationMin * 60000);
+      updateSystemPower();
+      addWebLog("[" + c.name + "] DELAY OVER. Switching to Battery...");
+    } 
+    else if (millis() - c.lastCountdownMsg >= 10000) { 
+      c.lastCountdownMsg = millis();
+      long rem = (c.startTime - millis()) / 1000;
+      addWebLog("[" + c.name + "] WAITING: " + String(rem/60) + "m " + String(rem%60) + "s.");
+    }
     return;
   }
+
+  if (!c.isRunning) return;
   
-  // Write the data and a new line
-  if(file.println(data)) {
-    Serial.println("Data saved to SD card");
-  } else {
-    Serial.println("Save failed");
+  if (millis() > c.endTime) {
+    c.isRunning = false;
+    addWebLog("[" + c.name + "] COMPLETED.");
+    updateSystemPower();
+    return;
   }
+
+  if (millis() - c.lastSampleTime >= (c.timeGapSec * 1000)) {
+    c.lastSampleTime = millis();
+    DateTime now = rtc.now();
+    String ts = String(now.hour()) + ":" + (now.minute()<10?"0":"") + String(now.minute()) + ":" + (now.second()<10?"0":"") + String(now.second());
+    
+    float t = (cageNum == 1) ? dht1.readTemperature() : dht2.readTemperature();
+    float h = (cageNum == 1) ? dht1.readHumidity() : dht2.readHumidity();
+    float l = (cageNum == 1) ? lightMeter1.readLightLevel() : lightMeter2.readLightLevel();
+    int re = (cageNum == 1) ? ads.readADC_SingleEnded(0) : ads.readADC_SingleEnded(1);
+    int rs = (cageNum == 1) ? ads.readADC_SingleEnded(2) : ads.readADC_SingleEnded(3);
+
+    File f = SD.open(c.currentFileName, FILE_APPEND);
+    if (f) {
+      if (f.size() == 0) f.println("Time,Variety,Salinity,Temp,Hum,Lux,ElecMV,SoilMV");
+      f.printf("%s,%s,%s,%.1f,%.1f,%.0f,%.1f,%.1f\n", ts.c_str(), c.variety.c_str(), c.salinity.c_str(), t, h, l, re*0.125, rs*0.125);
+      f.close();
+      // EXACT FORMAT REQUESTED:
+      String msg = "[" + c.name + "] " + ts + " | Temp:" + String(t,1) + " Hum:" + String(h,0) + "% Sal:" + c.salinity + " Lux:" + String(l,0) + " Elec:" + String(re*0.125,0) + "mV";
+      addWebLog(msg);
+    }
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  pinMode(BUILTIN_LED, OUTPUT);
+  pinMode(POWER_SWITCH_PIN, OUTPUT); 
+  digitalWrite(POWER_SWITCH_PIN, HIGH); // Start in Adapter Mode
   
-  file.close(); // Always close the file!
+  Wire.begin(I2C_SDA, I2C_SCL); 
+  rtc.begin(); dht1.begin(); dht2.begin(); ads.begin();
+  lightMeter1.begin(BH1750::CONTINUOUS_HIGH_RES_MODE, 0x23, &Wire);
+  lightMeter2.begin(BH1750::CONTINUOUS_HIGH_RES_MODE, 0x5C, &Wire);
+  
+  SPI.begin(SD_SCK, SD_MISO, SD_MOSI, SD_CS); 
+  SD.begin(SD_CS);
+  WiFi.begin(ssid, password);
+  MDNS.begin("tomato");
+  
+  server.on("/", handleRoot);
+  server.on("/start", handleStart);
+  server.on("/stop", handleStop);
+  server.on("/download", handleDownload);
+  server.on("/delete", handleDelete);
+  server.on("/logs", [](){
+    String l = "";
+    for(int i=MAX_WEB_LOGS-1; i>=0; i--) {
+      int idx = (webLogIndex + i) % MAX_WEB_LOGS;
+      if (webLogs[idx] != "") l += webLogs[idx];
+    }
+    server.send(200, "text/plain", l);
+  });
+  server.begin();
+}
+
+void loop() {
+  wificonnect(); 
+  server.handleClient();
+  collectData(cage1, 1);
+  collectData(cage2, 2);
 }
